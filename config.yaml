@@ -75,7 +75,7 @@ risk_check:
   mode: "api"
   api:
     provider: "deepseek"
-    token: "sk-f022a68b2c6144e8b466567e1e2171ac"
+    token: "sk-"
   # 规则模式关键词
   risk_keywords:
     - "裁员"
