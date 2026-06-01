@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import re
+import json
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional
@@ -337,6 +338,8 @@ class CompanyRiskChecker:
                 url = f"https://api.qichacha.com/CompanyRisk/GetRiskInfo?key={token}&company={name}"
                 resp = self._session.get(url, timeout=10)
                 return self._parse_api_response(resp.json())
+            elif provider == "deepseek":
+                return self._check_via_deepseek(name)
             else:
                 logger.warning(f"不支持的 API 提供商: {provider}")
                 return self._check_via_rules(name)
@@ -362,3 +365,258 @@ class CompanyRiskChecker:
         result.reasons = reasons if isinstance(reasons, list) else [str(reasons)]
         result.details = data
         return result
+
+    # ==================== DeepSeek 模式 ====================
+
+    def _check_via_deepseek(self, name: str) -> RiskResult:
+        """调用 DeepSeek 联网搜索对公司进行风险评估"""
+        token = self.api_cfg.get("token", "")
+        if not token:
+            return self._check_via_rules(name)
+
+        prompt = (
+            f'请联网搜索 "{name}" 这家公司的真实信息，评估对求职者是否存在风险。\n\n'
+            '对求职者高风险的信号（发现后严重扣分）：\n'
+            '- 是人力资源/劳务派遣/外包/中介公司\n'
+            '- 涉及培训贷、入职收费、岗前培训收费\n'
+            '- 有拖欠工资、劳动纠纷、裁员纠纷\n'
+            '- 经营异常、失信、注销/吊销\n\n'
+            '低风险信号：\n'
+            '- 正常经营的科技/网络/信息技术公司\n'
+            '- 知名品牌或上市企业\n\n'
+            '返回 JSON（不要加其他文字）：\n'
+            '{"score":0-100,"reasons":["基于搜索到的具体信息"],"summary":"15字内总结"}\n'
+            '评分：0-14=safe  15-34=low  35-59=medium  60-100=high'
+        )
+
+        logger.info(f"  🔍 联网搜索公司: \"{name}\"")
+        self._log_deepseek("REQ-风险", f"搜索公司: {name}")
+
+        try:
+            resp = self._session.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": "你是招聘风险评估专家，可以联网搜索企业信息。只输出JSON。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 400,
+                    "enable_web_search": True,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            content = body["choices"][0]["message"]["content"]
+            self._log_deepseek("RSP-风险", content[:500])
+            parsed = json.loads(self._clean_json(content))
+            return self._build_risk_result(parsed, name)
+        except Exception as e:
+            logger.error(f"DeepSeek 失败: {e}")
+            return self._check_via_rules(name)
+
+    # ---- DeepSeek 请求/响应日志 ----
+    _deepseek_log_path = None
+
+    @classmethod
+    def _log_deepseek(cls, tag: str, content: str):
+        """将 DeepSeek 请求/响应写入日志文件"""
+        try:
+            if cls._deepseek_log_path is None:
+                from pathlib import Path as _P
+                cls._deepseek_log_path = str(_P(__file__).parent / "deepseek_trace.log")
+            from datetime import datetime
+            ts = datetime.now().strftime("%H:%M:%S")
+            with open(cls._deepseek_log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n[{ts}] {tag}\n{content}\n{'='*60}\n")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _clean_json(text: str) -> str:
+        text = text.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            lines = lines[1:] if lines[0].startswith("```") else lines
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines)
+        return text
+
+    def _build_risk_result(self, parsed: dict, name: str) -> RiskResult:
+        result = RiskResult()
+        result.score = min(100, max(0, int(parsed.get("score", 0))))
+        # 优先用 score 映射 level（模型返回的 level 可能矛盾）
+        result.level = self._score_to_level(result.score)
+        result.reasons = parsed.get("reasons", [])
+        if isinstance(result.reasons, str):
+            result.reasons = [result.reasons]
+        summary = parsed.get("summary", "")
+        result.details = {"company": name, "mode": "deepseek+search",
+                          "summary": summary, "raw": parsed}
+        logger.info(
+            f"  🤖 DeepSeek [{result.level.value}] {name}: "
+            f"score={result.score} | {summary}"
+        )
+        return result
+
+    @staticmethod
+    def _score_to_level(score: int) -> RiskLevel:
+        if score >= 60: return RiskLevel.HIGH
+        if score >= 35: return RiskLevel.MEDIUM
+        if score >= 15: return RiskLevel.LOW
+        return RiskLevel.SAFE
+
+    # ==================== AI 岗位匹配（DeepSeek） ====================
+
+    def match_job(self, resume_text: str, job: dict) -> Optional[dict]:
+        """用 DeepSeek 实时分析岗位是否匹配简历。
+
+        返回 {
+            "score": 0-100,       # 综合匹配分
+            "fit": True/False,    # 是否推荐投递
+            "reasons": [...],     # 匹配/不匹配的具体理由
+            "missing": [...],     # 候选人缺少的技能/经验
+        }
+        失败返回 None → 回退规则匹配
+        """
+        token = self.api_cfg.get("token", "")
+        if not token:
+            return None
+
+        resume_snippet = resume_text[:2000] if resume_text else ""
+        title = job.get("title", "")
+        desc = (job.get("description") or "")[:500]
+        skills = job.get("skills_required", [])
+        location = job.get("location", "")
+        education = job.get("education", "")
+        experience = job.get("experience", "")
+        salary = job.get("salary", "")
+
+        prompt = (
+            "你是求职匹配专家。根据候选人简历，判断以下岗位是否值得投递。\n\n"
+            f"=== 候选人简历 ===\n{resume_snippet}\n\n"
+            f"=== 岗位信息 ===\n"
+            f"标题：{title}\n"
+            f"薪资：{salary}\n"
+            f"地点：{location}\n"
+            f"经验要求：{experience}\n"
+            f"学历要求：{education}\n"
+            f"技能要求：{', '.join(skills) if skills else '无'}\n"
+            f"描述：{desc if desc else '无'}\n\n"
+            "分析维度：\n"
+            "1. 技术栈匹配度 - 岗位要求的技能是否在简历中出现过？\n"
+            "2. 经验匹配度 - 候选人的经验/学历是否满足要求？\n"
+            "3. 岗位真实性 - 描述是否笼统空泛？是否像刷KPI/培训广告？\n"
+            "4. 方向匹配度 - 岗位是否在候选人的专业方向上？\n\n"
+            "返回 JSON（不要加其他文字）：\n"
+            '{"score":0-100,"fit":true/false,"reasons":["理由1","理由2"],"missing":["缺失项1"]}\n\n'
+            "score>=75=高度匹配值得投递 fit=true\n"
+            "score 50-74=部分匹配可以投 fit=true\n"
+            "score 35-49=不太匹配不建议投 fit=false\n"
+            "score<35=完全不匹配 fit=false"
+        )
+
+        self._log_deepseek("REQ-匹配", f"岗位: {title} @ {job.get('company','?')}\n简历: {resume_snippet[:300]}")
+
+        try:
+            resp = self._session.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": "你是求职匹配专家，可以联网搜索岗位的真实要求。只输出JSON。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 350,
+                    "enable_web_search": True,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            self._log_deepseek("RSP-匹配", content[:500])
+            parsed = json.loads(self._clean_json(content))
+
+            score = min(100, max(0, int(parsed.get("score", 50))))
+            fit = parsed.get("fit", score >= 50)
+            reasons = parsed.get("reasons", [])
+            if isinstance(reasons, str): reasons = [reasons]
+            missing = parsed.get("missing", [])
+            if isinstance(missing, str): missing = [missing]
+
+            logger.info(
+                f"  🎯 AI匹配: fit={fit} score={score} | "
+                f"{'; '.join(reasons[:2]) if reasons else ''}"
+            )
+            return {"score": score, "fit": fit, "reasons": reasons, "missing": missing}
+        except Exception as e:
+            logger.error(f"AI匹配失败: {e}")
+            return None
+
+    # ==================== 简历分析 → 搜索关键词（DeepSeek） ====================
+
+    def suggest_search_keywords(self, resume_text: str) -> list[str]:
+        """用 DeepSeek 分析简历，推荐 BOSS直聘 搜索关键词。
+
+        返回关键词列表，如 ["AI应用开发", "Python开发", "机器学习"]
+        失败返回空列表 → 使用配置文件中的关键词
+        """
+        token = self.api_cfg.get("token", "")
+        if not token:
+            return []
+
+        resume_snippet = resume_text[:2500] if resume_text else ""
+
+        prompt = (
+            "你是求职岗位分析专家。根据候选人简历，推荐在BOSS直聘上应该搜索哪些岗位关键词。\n\n"
+            f"=== 候选人简历 ===\n{resume_snippet}\n\n"
+            "要求：\n"
+            "1. 提取简历中的核心技术栈和方向，生成3-6个精准的搜索关键词\n"
+            "2. 关键词应该是BOSS直聘上的常见岗位名称（如：Python开发工程师、AI应用开发、数据分析师）\n"
+            "3. 优先推荐与候选人技能直接匹配的岗位方向\n"
+            "4. 关键词不要太宽泛（如只写AI），也要有具体岗位名\n"
+            "5. 按匹配度从高到低排序\n\n"
+            "返回 JSON（不要加其他文字）：\n"
+            '{"keywords": ["关键词1", "关键词2", "关键词3", ...]}'
+        )
+
+        try:
+            resp = self._session.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": "你是求职分析专家，只输出JSON。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 300,
+                },
+                timeout=20,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            parsed = json.loads(self._clean_json(content))
+            keywords = parsed.get("keywords", [])
+            if isinstance(keywords, list) and keywords:
+                logger.info(f"  🧠 AI推荐搜索关键词: {', '.join(keywords)}")
+                return keywords
+        except Exception as e:
+            logger.error(f"AI关键词推荐失败: {e}")
+        return []

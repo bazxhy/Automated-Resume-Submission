@@ -5,7 +5,10 @@ BOSS直聘: 打开岗位详情 → 点击「立即沟通」→ 系统自动发�
 
 from __future__ import annotations
 
+import json
 import time
+from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from DrissionPage import Chromium
@@ -19,8 +22,9 @@ logger = get_logger("submit")
 
 
 class SubmitResult:
-    SUCCESS = "success"
+    SUCCESS = "投递成功"
     SKIPPED = "skipped"
+    DAILY_LIMIT = "daily_limit"
     ALREADY_APPLIED = "already_applied"
     LOGIN_REQUIRED = "login_required"
     DAILY_LIMIT = "daily_limit"
@@ -40,14 +44,50 @@ class JobSubmitter:
             "greeting",
             "您好，我是2026届信息工程专业本科毕业生，比较匹配贵公司岗位的招聘要求，可以发个简历给您看看吗？"
         )
-        self.daily_limit = submit_cfg.get("daily_limit", 50)
-        self._today_count = 0
+        self.daily_limit = submit_cfg.get("daily_limit", 150)
+
+        # 每日计数器文件
+        self._counter_file = Path(__file__).parent / "daily_count.json"
+        self._today = date.today().isoformat()
+        self._today_count = self._load_today_count()
+
+    # ==================== 每日计数 ====================
+
+    def _load_today_count(self) -> int:
+        """从文件加载今日投递数，跨天自动归零"""
+        try:
+            if self._counter_file.exists():
+                data = json.loads(self._counter_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("date") == self._today:
+                    return int(data.get("count", 0))
+        except Exception:
+            pass
+        return 0
+
+    def _save_today_count(self):
+        """保存今日投递数到文件"""
+        try:
+            self._counter_file.write_text(
+                json.dumps({"date": self._today, "count": self._today_count},
+                           ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning(f"保存每日计数失败: {e}")
+
+    # ==================== 投递 ====================
 
     def submit(self, job: JobPosting, match_score: float) -> str:
         """打开岗位 → 点立即沟通 → 系统自动发消息"""
 
+        # 每次调用都刷新（防止跨天）
+        new_today = date.today().isoformat()
+        if new_today != self._today:
+            self._today = new_today
+            self._today_count = self._load_today_count()
+
         if self._today_count >= self.daily_limit:
-            logger.warning(f"已达每日上限 ({self.daily_limit})")
+            logger.warning(f"今日已投 {self._today_count}/{self.daily_limit}，已达上限")
             return SubmitResult.DAILY_LIMIT
 
         logger.info(
@@ -59,7 +99,6 @@ class JobSubmitter:
             logger.warning("  ❌ 无岗位链接")
             return SubmitResult.FAILED
 
-        # 用新标签页投递，不影响搜索页
         submit_tab = None
         try:
             submit_tab = self.browser.new_tab(job.url)
@@ -78,8 +117,8 @@ class JobSubmitter:
             if not self._click_contact(submit_tab):
                 return SubmitResult.FAILED
 
-            time.sleep(1)
             self._today_count += 1
+            self._save_today_count()
             logger.info(
                 f"  ✅ 沟通已发起 ({self._today_count}/{self.daily_limit})"
             )
@@ -111,75 +150,29 @@ class JobSubmitter:
 
     def _click_contact(self, tab) -> bool:
         """多策略查找并点击「立即沟通」"""
-
-        # 策略 1: 精确文本
-        for text in ["立即沟通", "立即沟通", "聊一聊", "发消息", "投递简历"]:
+        for text in ("立即沟通", "聊一聊", "发消息", "投递简历"):
             try:
                 btn = tab.ele(f"text:{text}")
                 if btn:
                     btn.click()
                     logger.info(f"  👆 点击「{text}」")
+                    time.sleep(1)
                     return True
             except Exception:
                 continue
 
-        # 策略 2: 包含文本（@@text() 是 DrissionPage 的模糊匹配）
-        for text in ["沟通", "投递"]:
+        for text in ("沟通", "投递"):
             try:
                 btn = tab.ele(f"@@text():{text}")
                 if btn:
                     btn.click()
-                    logger.info(f"  👆 点击含「{text}」的按钮")
+                    time.sleep(1)
                     return True
             except Exception:
                 continue
-
-        # 策略 3: CSS 选择器
-        for sel in [
-            'a[class*="btn"][class*="chat"]',
-            'span[class*="op-btn"]',
-            '[class*="chat-btn"]',
-            '[class*="contact-btn"]',
-            'div[class*="op-btn"]',
-            '[class*="start-chat"]',
-        ]:
-            try:
-                btn = tab.ele(sel)
-                if btn:
-                    btn.click()
-                    logger.info(f"  👆 CSS匹配: {sel}")
-                    return True
-            except Exception:
-                continue
-
-        # 策略 4: 全页扫描所有元素，找包含关键词的
-        try:
-            all_els = tab.eles("tag:span, tag:a, tag:button, tag:div")
-            for el in (all_els or []):
-                try:
-                    t = (el.text or "").strip()
-                    if any(w in t for w in ["立即沟通", "沟通"]) and len(t) <= 15:
-                        el.click()
-                        logger.info(f"  👆 全页扫描命中: 「{t}」")
-                        return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
 
         logger.warning("  ❌ 未找到「立即沟通」按钮")
-        self._debug_page(tab)
         return False
-
-    def _debug_page(self, tab):
-        """打印页面信息帮助排查"""
-        try:
-            body = tab.ele("tag:body")
-            if body:
-                txt = body.text[:400].replace("\n", " | ")
-                logger.info(f"  页面内容: {txt}")
-        except Exception:
-            pass
 
     # ==================== 辅助 ====================
 

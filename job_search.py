@@ -168,6 +168,76 @@ class JobSearcher:
 
     # ==================== 页面解析 ====================
 
+    def _fetch_api_jobs(self, tab, keyword: str, page: int = 1) -> list[JobPosting]:
+        """用浏览器 Cookie 调 BOSS直聘 API（全量 Cookie 含 HttpOnly）"""
+        import requests as _req
+        try:
+            # CDP Network.getAllCookies 拿到全量 cookie（含 HttpOnly 认证 token）
+            cdp_resp = tab.run_cdp("Network.getAllCookies")
+            cdp_cookies = cdp_resp.get("cookies", [])
+            jar = _req.cookies.RequestsCookieJar()
+            for c in cdp_cookies:
+                jar.set(c.get("name", ""), c.get("value", ""),
+                        domain=c.get("domain", ".zhipin.com"),
+                        path=c.get("path", "/"))
+
+            s = _req.Session()
+            s.cookies = jar
+            s.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://www.zhipin.com/web/geek/job",
+            })
+
+            params = {
+                "scene": "1", "query": keyword, "city": self.city_code,
+                "page": page, "pageSize": 30,
+            }
+            if self.exp_code:
+                params["experience"] = self.exp_code
+
+            resp = s.get(
+                "https://www.zhipin.com/wapi/zpgeek/search/joblist.json",
+                params=params, timeout=15,
+            )
+            if resp.status_code != 200:
+                logger.warning(f"  API HTTP {resp.status_code}, p{page}")
+                return []
+            data = resp.json()
+            if data.get("code") != 0:
+                logger.warning(f"  API err code={data.get('code')}")
+                return []
+
+            jl = data.get("zpData", {}).get("jobList", [])
+            if not jl:
+                return []
+
+            jobs = []
+            for j in jl:
+                job = JobPosting()
+                job.title = j.get("jobName", "")
+                job.company = j.get("brandName", "")
+                job.salary = j.get("salaryDesc", "")
+                job.salary_min, job.salary_max = extract_salary_range(job.salary)
+                job.location = f"{j.get('cityName','')} {j.get('areaDistrict','')}".strip()
+                job.experience = j.get("jobExperience", "")
+                job.education = j.get("jobDegree", "")
+                job.boss_name = j.get("bossName", "")
+                job.company_size = j.get("brandScaleName", "")
+                job.company_industry = j.get("brandIndustry", "")
+                job.description = j.get("itemDescription", "") or ""
+                eid = j.get("encryptJobId", "")
+                job.url = f"https://www.zhipin.com/job_detail/{eid}.html" if eid else ""
+                tags = j.get("jobLabels", []) or []
+                job.skills_required = tags[:8] if tags else []
+                if job.title:
+                    jobs.append(job)
+
+            logger.info(f"  API p{page}: {len(jobs)}个 | 公司={jobs[0].company if jobs else '?'} 学历={jobs[0].education if jobs else '?'}")
+            return jobs
+        except Exception as e:
+            logger.warning(f"  API p{page}失败: {e}")
+            return []
+
     def _parse_page(self, tab) -> list[JobPosting]:
         cards = self._find_card_elements(tab)
         if not cards:
@@ -237,23 +307,41 @@ class JobSearcher:
         if not job.salary:
             job.salary = "面议"
 
-        # ---- 公司名：找薪资行后或标题行后的第一个合法行 ----
+        # ---- 公司名：文本提取 + DOM 兜底 ----
+        # 1) 文本行（原逻辑，先跑）— 找薪资行后的第一个合法行
         passed_salary = False
         for line in lines:
-            if _is_salary(line):
-                passed_salary = True
-                continue
+            if _is_salary(line): passed_salary = True; continue
             if passed_salary and _is_company(line) and line != job.title:
-                job.company = line
-                break
-        # 无薪资时，从标题后找
+                job.company = line; break
         if not job.company:
             for line in lines:
-                if line == job.title:
-                    continue
-                if _is_company(line):
-                    job.company = line
-                    break
+                if line == job.title: continue
+                if _is_company(line): job.company = line; break
+        # 2) DOM 兜底: 从卡片向上找含 /gongsi/ 的父节点
+        if not job.company:
+            try:
+                node = card
+                for _ in range(4):  # 向上走4层
+                    for a in (node.eles("tag:a") or []):
+                        try:
+                            href = a.link
+                            if href and "/gongsi/" in str(href):
+                                n = (a.text or "").strip()
+                                if 2 <= len(n) <= 50:
+                                    job.company = n; break
+                        except Exception: continue
+                    if job.company: break
+                    try: node = node.parent(1)
+                    except Exception: break
+            except Exception: pass
+        # 3) 校验：拒绝明显是岗位标题的假公司名
+        if job.company and job.title:
+            _title_kw = ("工程师","经理","AI","Java","Python","管培生","校招","应届","开发","测试","产品")
+            _comp_kw = ("公司","有限","科技","网络","集团","技术","股份","企业","华为","阿里","腾讯","字节","百度")
+            if any(w in job.company for w in _title_kw) \
+               and not any(w in job.company for w in _comp_kw):
+                job.company = ""
 
         # ---- 地点/经验/学历 ----
         for line in lines:

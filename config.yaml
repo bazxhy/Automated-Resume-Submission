@@ -19,7 +19,7 @@ login:
 
 # --- 简历文件 ---
 resume:
-  file_path: "./简历(1).pdf"    # 支持 .pdf / .docx / .txt
+  file_path: "./_AI_Python_简历.pdf"    # 支持 .pdf / .docx / .txt（留空则自动扫描）
   encoding: "utf-8"
 
 # --- 岗位搜索条件 ---
@@ -62,16 +62,20 @@ filter:
   # KPI 检测: 岗位被判为刷KPI时是否跳过 (建议开启)
   skip_kpi: true
   skip_kpi_score: 60   # KPI 得分 >= 此值跳过
+  # AI 岗位适合度检查：用 DeepSeek 判断岗位是否确实匹配简历（仅 api 模式可用）
+  ai_fit_check: true
+  ai_fit_min_score: 40   # 适合度得分 < 此值跳过
+  # 最高学历限制：要求高于此学历的岗位跳过（留空=不限制）
+  max_education: "本科"
 
 # --- 公司风险检测 ---
 # mode: "rule"   → 基于规则的本地检测（免费，但数据有限）
 # mode: "api"    → 调用外部 API（天眼查/企查查，需配置 key）
 risk_check:
-  mode: "rule"
-  # API 模式配置（可选）
+  mode: "api"
   api:
-    provider: ""               # "tianyancha" 或 "qichacha"
-    token: ""
+    provider: "deepseek"
+    token: "sk-f022a68b2c6144e8b466567e1e2171ac"
   # 规则模式关键词
   risk_keywords:
     - "裁员"
@@ -88,7 +92,7 @@ submit:
   # 打招呼语（BOSS限制每天打招呼数量，建议简短）
   greeting: "您好，我是2026届信息工程专业本科毕业生，比较匹配贵公司岗位的招聘要求，可以发个简历给您看看吗？"
   # 每天最大投递数（防止封号）
-  daily_limit: 50
+  daily_limit: 150
   # 投递间隔（秒），随机在 [min, max] 之间
   interval:
     min: 8

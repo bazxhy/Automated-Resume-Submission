@@ -1,19 +1,21 @@
-# Automated Resume Submission (BOSS直聘自动投递)
+# 🤖 BOSS直聘 AI 自动投递
 
-一键自动搜索、筛选、投递 BOSS直聘 岗位，支持简历解析 + 公司风险检测 + KPI 岗位识别。
+基于 DeepSeek 大模型的 BOSS直聘 全自动简历投递工具。AI 分析简历 → 推荐搜索关键词 → 联网评估公司风险 → 实时匹配岗位适合度 → 一键投递。
 
-## 功能
+## ✨ 功能
 
 | 模块 | 功能 |
 |------|------|
-| 简历解析 | 支持 PDF / DOCX / TXT 格式，提取姓名、技能、工作经历 |
-| 岗位搜索 | 多关键词滚动搜索，按城市 + 工作经验筛选 |
-| 公司风险检测 | 识别外包/劳务派遣/诈骗公司，标记 MEDIUM/HIGH 风险 |
-| KPI 刷量识别 | 检测薪资异常、描述笼统、同公司大量岗位等特征 |
-| 岗位匹配 | 技能 + 经验 + 学历 + 薪资 + 关键词 五维打分 (0-100) |
-| 一键投递 | 自动点击"立即沟通"，防重复投递，实时保存记录 |
+| 🧠 AI 简历分析 | DeepSeek 分析简历内容，自动推荐最匹配的搜索关键词 |
+| 🔍 岗位搜索 | API 批量拉取（公司名/学历/经验完整数据）+ DOM 滚动回退 |
+| 🛡️ 公司风险评估 | DeepSeek **联网搜索**企业工商信息、经营状况、劳动纠纷 |
+| 🎯 AI 岗位匹配 | 实时对照简历分析岗位适合度（技术栈/经验/方向匹配） |
+| 📋 规则匹配 | 技能 + 经验 + 学历 + 薪资 + 关键词 五维打分 (0-100) |
+| 🚫 学历过滤 | 可配置最高学历限制，自动跳过硕博岗位 |
+| 🔄 每日计数 | 文件持久化每日投递数，跨天自动归零，多次运行不超限 |
+| 📝 投递记录 | CSV + JSON 双重记录，防重复投递 |
 
-## 安装
+## 🚀 快速开始
 
 ```bash
 git clone https://github.com/bazxhy/Automated-Resume-Submission.git
@@ -21,133 +23,121 @@ cd Automated-Resume-Submission
 pip install -r requirements.txt
 ```
 
-## 使用
+### 配置 `config.yaml`
 
-### 命令行
+```yaml
+search:
+  keywords: ["嵌入式", "STM32", "单片机"]  # AI 模式下会自动推荐，留空即可
+  city: "杭州"
+  experience: "应届生"
+
+filter:
+  exclude_titles: ["实习", "外包", "培训"]
+  max_education: "本科"        # 自动跳过硕士/博士岗位
+  ai_fit_check: true           # 开启 AI 岗位匹配
+  ai_fit_min_score: 40         # AI 匹配分 < 40 跳过
+
+risk_check:
+  mode: "api"                  # api=DeepSeek联网评估, rule=本地规则
+  api:
+    provider: "deepseek"
+    token: "sk-xxx"            # DeepSeek API Key
+
+submit:
+  daily_limit: 150             # 每日最大投递数
+  interval:
+    min: 8
+    max: 20
+```
+
+### 运行
 
 ```bash
-# 完整流程（需要扫码登录 BOSS直聘）
+# 完整流程
 python main.py
 
-# 仅搜索不投递（预览模式）
+# 预览模式（不实际投递）
 python main.py --search-only
 
-# 仅测试简历解析
-python main.py --resume-only
+# 指定简历
+python main.py --resume ./我的简历.pdf
 
-# 使用自定义配置
+# 自定义配置
 python main.py --config my_config.yaml
 ```
 
-### GUI 桌面版
-
-```bash
-python gui.py
-```
-
-或打包为 exe：
+### 打包为 exe
 
 ```bash
 build.bat
 # 输出: dist/BOSS自动投递.exe
 ```
 
-## 配置
+## 🧠 AI 工作流
 
-编辑 `config.yaml`：
-
-```yaml
-search:
-  keywords: ["嵌入式", "单片机", "STM32"]  # 搜索关键词
-  city: "杭州"                              # 城市
-  experience: "应届生"                      # 工作经验筛选
-
-filter:
-  min_match_score: 70                      # 最低匹配分
-  skip_kpi: true                           # 过滤 KPI 刷量岗位
-  exclude_titles: ["实习", "外包", "培训"]  # 标题排除
-
-submit:
-  daily_limit: 50                          # 每日最大投递数
-  interval:
-    min: 8                                  # 投递间隔(秒)
-    max: 20
+```
+简历解析 → AI 分析推荐搜索关键词
+     ↓
+API 批量拉取岗位（公司名/学历/经验完整数据）
+     ↓
+逐个岗位:
+  ├─ 标题排除 / 学历过滤 / 技能过滤
+  ├─ 🌐 DeepSeek 联网搜索公司风险（查工商/纠纷/经营异常）
+  ├─ 🎯 DeepSeek 实时对照简历判断岗位适合度
+  └─ ✅ 点击立即沟通 → 每日计数 +1
 ```
 
-BOSS直聘工作经验代码：
-| 选项 | 代码 |
-|------|------|
-| 经验不限 | 101 |
-| 应届生 | 102 |
-| 1年以内 | 103 |
-| 1-3年 | 104 |
-| 3-5年 | 105 |
-| 5-10年 | 106 |
-| 10年以上 | 107 |
-| 在校生 | 108 |
+## 🛡️ 公司风险评估
 
-## 项目结构
+DeepSeek **联网搜索**（非凭名字猜测）：
+- 查询企业工商注册信息、经营状态
+- 检测是否有劳动纠纷、拖欠工资记录
+- 识别外包/中介/培训贷/皮包公司
+
+风险等级：`SAFE(0-14)` → `LOW(15-34)` → `MEDIUM(35-59)` → `HIGH(60-100)`
+
+## 🎯 AI 岗位匹配
+
+四个维度实时分析：
+- **技术栈匹配** — 岗位技能是否在简历中出现
+- **经验匹配** — 经验/学历是否满足
+- **岗位真实性** — 描述是否笼统空泛/刷KPI
+- **方向匹配** — 是否在候选人专业方向上
+
+评分：`≥75` 高度匹配 → `50-74` 部分匹配 → `<35` 完全不匹配
+
+## 📊 每日计数
+
+- 每次投递成功写入 `daily_count.json`
+- 同一天多次运行自动累加，达到 150 上限自动停止
+- 跨天自动归零，第二天重新计算
+
+## 🗂️ 项目结构
 
 ```
 auto-boss/
-├── main.py           # 主程序入口（命令行）
-├── gui.py            # GUI 桌面版入口
-├── config.yaml       # 配置文件
-├── requirements.txt  # Python 依赖
-├── build.bat         # 打包脚本
-├── .gitignore
-├── boss_login.py     # BOSS直聘登录（扫码/Cookie）
-├── job_search.py     # 岗位搜索 + 卡片解析
-├── job_matcher.py    # 岗位匹配度分析
-├── company_risk.py   # 公司风险 + KPI 检测
-├── submitter.py      # 投递执行（点击"立即沟通"）
-├── recorder.py       # 投递记录（CSV + JSON）
-├── resume_parser.py  # 简历解析（PDF/DOCX/TXT）
-└── utils.py          # 工具函数
+├── main.py            # 主入口（CLI）
+├── config.yaml        # 配置文件
+├── build.bat          # 打包脚本
+├── boss_login.py      # BOSS直聘扫码登录
+├── job_search.py      # 岗位搜索（API + DOM）
+├── job_matcher.py     # 规则匹配打分
+├── company_risk.py    # AI 风险评估 + 岗位匹配 + 关键词推荐
+├── submitter.py       # 投递执行 + 每日计数
+├── recorder.py        # 投递记录
+├── resume_parser.py   # 简历解析
+└── utils.py           # 工具函数
 ```
 
-## 匹配度说明
-
-| 维度 | 权重 | 满分 | 说明 |
-|------|------|------|------|
-| 技能匹配 | 40% | 40 | 简历技能 vs 岗位要求 |
-| 经验匹配 | 20% | 20 | 工作年限对比 |
-| 学历匹配 | 15% | 15 | 学历要求对比 |
-| 薪资匹配 | 10% | 10 | 薪资范围重合度 |
-| 关键词匹配 | 15% | 15 | JD 关键词 vs 简历文本 |
-| 标题加分 | - | +15 | 岗位标题含嵌入式关键词 |
-
-## 风险检测
-
-### 公司风险
-
-- 公司名含"人力资源/劳务派遣" → +35分
-- 含"培训/理财/保险" → +30分
-- 无行业/规模信息的泛化公司名 → +20分
-- 薪资异常（max > min*5）→ +20分
-
-风险等级：0-14=SAFE, 15-34=LOW, 35-59=MEDIUM(跳过), 60+=HIGH(跳过)
-
-### KPI 刷量
-
-- 标题含"急聘/大量招聘" → +15分
-- 薪资范围 >5倍 → +20分
-- 描述 <80字 → +10分
-- 描述过于笼统 → +15分
-- "弹性工作"+"抗压"组合 → +10分
-
-KPI 得分 ≥60 自动跳过
-
-## 技术栈
+## 🔧 技术栈
 
 - Python 3.10+
-- DrissionPage (浏览器自动化，无 Selenium 痕迹)
-- PyMuPDF / pdfplumber (PDF 简历解析)
-- python-docx (DOCX 简历解析)
-- PyYAML (配置管理)
-- tkinter (GUI)
-- PyInstaller (打包)
+- DrissionPage（浏览器自动化，无 Selenium 痕迹）
+- DeepSeek API（联网搜索 + 风险评估 + 岗位匹配）
+- PyMuPDF / pdfplumber / python-docx（简历解析）
+- PyYAML / requests / tkinter
+- PyInstaller（打包）
 
-## License
+## 📄 License
 
 MIT

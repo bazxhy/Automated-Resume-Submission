@@ -9,6 +9,8 @@ resume.txt
 cookies.json
 apply_record.json
 submit_log.csv
+daily_count.json
+deepseek_trace.log
 config_gui.yaml
 *.pyc
 __pycache__/

@@ -179,3 +179,20 @@ def safe_save_json(data, path: str):
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def find_resume_file(base_dir: Optional[Path] = None) -> Optional[Path]:
+    """自动扫描目录找到简历文件（.pdf/.docx/.txt）"""
+    root = base_dir or project_root()
+    best = None
+    name_kw = ["简历", "resume", "cv"]
+    candidates = []
+    for f in root.iterdir():
+        if not f.is_file(): continue
+        if f.suffix.lower() not in (".pdf", ".docx", ".txt"): continue
+        if f.name == "requirements.txt": continue
+        priority = 0 if any(k in f.name.lower() for k in name_kw) else 1
+        candidates.append((priority, -f.stat().st_mtime, f))
+    if not candidates: return None
+    candidates.sort()
+    return candidates[0][2]

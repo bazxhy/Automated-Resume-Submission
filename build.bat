@@ -19,11 +19,19 @@ echo [2/3] 清理旧构建...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
-REM 打包
+REM 打包（CLI 版本 main.py，保留控制台输出）
 echo [3/3] 打包中...
-pyinstaller --noconfirm --onefile --windowed ^
+pyinstaller --noconfirm --onefile --console ^
     --name "BOSS自动投递" ^
     --add-data "config.yaml;." ^
+    --add-data "resume_parser.py;." ^
+    --add-data "job_search.py;." ^
+    --add-data "job_matcher.py;." ^
+    --add-data "company_risk.py;." ^
+    --add-data "submitter.py;." ^
+    --add-data "recorder.py;." ^
+    --add-data "boss_login.py;." ^
+    --add-data "utils.py;." ^
     --hidden-import=DrissionPage ^
     --hidden-import=DrissionPage._pages.chromium_tab ^
     --hidden-import=yaml ^
@@ -33,8 +41,10 @@ pyinstaller --noconfirm --onefile --windowed ^
     --hidden-import=requests ^
     --hidden-import=jieba ^
     --hidden-import=urllib.parse ^
+    --hidden-import=json ^
+    --hidden-import=pathlib ^
     --collect-all DrissionPage ^
-    gui.py
+    main.py
 
 if %errorlevel% equ 0 (
     echo.
