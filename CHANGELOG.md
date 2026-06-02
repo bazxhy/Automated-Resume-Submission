@@ -2,6 +2,13 @@
 
 ## 2026-06-02
 
+### Git推送配置（中国大陆）
+HTTPS 连接 GitHub 会被 reset，需改用 SSH：
+```bash
+git remote set-url origin git@github.com:bazxhy/Automated-Resume-Submission.git
+git push --set-upstream origin main
+```
+
 ### 问题1：搜索无法触发
 **现象**：程序在搜索框填入关键词后不执行搜索，API返回的数据与关键词无关（Java/C++后端岗而非"单片机开发"）。
 
