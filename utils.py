@@ -196,3 +196,20 @@ def find_resume_file(base_dir: Optional[Path] = None) -> Optional[Path]:
     if not candidates: return None
     candidates.sort()
     return candidates[0][2]
+
+
+def find_all_resume_files(base_dir: Optional[Path] = None) -> list[Path]:
+    """自动扫描目录找到所有简历文件（.pdf/.docx/.txt），按修改时间倒序"""
+    root = base_dir or project_root()
+    name_kw = ["简历", "resume", "cv"]
+    candidates = []
+    for f in root.iterdir():
+        if not f.is_file(): continue
+        if f.suffix.lower() not in (".pdf", ".docx", ".txt"): continue
+        if f.name == "requirements.txt": continue
+        # 优先匹配简历关键词，其次按修改时间
+        priority = 0 if any(k in f.name.lower() for k in name_kw) else 1
+        candidates.append((priority, -f.stat().st_mtime, f))
+    if not candidates: return []
+    candidates.sort()
+    return [c[2] for c in candidates]

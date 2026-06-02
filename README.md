@@ -7,13 +7,16 @@
 | 模块 | 功能 |
 |------|------|
 | 🧠 AI 简历分析 | DeepSeek 分析简历内容，自动推荐最匹配的搜索关键词 |
-| 🔍 岗位搜索 | API 批量拉取（公司名/学历/经验完整数据）+ DOM 滚动回退 |
+| 🔍 岗位搜索 | **网络监听捕获**BOSS SPA 自身的 API 响应（标题/公司/薪资完整） |
 | 🛡️ 公司风险评估 | DeepSeek **联网搜索**企业工商信息、经营状况、劳动纠纷 |
 | 🎯 AI 岗位匹配 | 实时对照简历分析岗位适合度（技术栈/经验/方向匹配） |
 | 📋 规则匹配 | 技能 + 经验 + 学历 + 薪资 + 关键词 五维打分 (0-100) |
-| 🚫 学历过滤 | 可配置最高学历限制，自动跳过硕博岗位 |
+| 🎓 学历过滤 | 可配置最高学历限制，自动跳过硕博岗位 |
+| ⏳ 经验过滤 | 可配置最高经验限制，跳过资深/高级岗位 |
+| ⚙️ 交互筛选 | 启动时可手动选择工作经验、学历筛选条件 |
 | 🔄 每日计数 | 文件持久化每日投递数，跨天自动归零，多次运行不超限 |
 | 📝 投递记录 | CSV + JSON 双重记录，防重复投递 |
+| 📡 捕获日志 | 每轮搜索岗位实时写入 `capture_log.txt`，便于确认搜索结果 |
 
 ## 🚀 快速开始
 
@@ -34,6 +37,7 @@ search:
 filter:
   exclude_titles: ["实习", "外包", "培训"]
   max_education: "本科"        # 自动跳过硕士/博士岗位
+  max_experience: "1-3年"      # 自动跳过3年以上的资深岗位
   ai_fit_check: true           # 开启 AI 岗位匹配
   ai_fit_min_score: 40         # AI 匹配分 < 40 跳过
 
@@ -66,6 +70,18 @@ python main.py --resume ./我的简历.pdf
 python main.py --config my_config.yaml
 ```
 
+### 交互式筛选
+
+启动后可在菜单中手动选择工作经验/学历筛选条件：
+
+```
+⚙️  筛选条件设置（直接回车=使用默认值）
+  📅 最高可接受的工作经验：
+    [1] 应届生/在校生  [2] 1年以内  [3] 1-3年  [0] 不限
+  🎓 最高可接受的学历要求：
+    [1] 大专  [2] 本科  [3] 硕士  [0] 不限
+```
+
 ### 打包为 exe
 
 ```bash
@@ -78,14 +94,29 @@ build.bat
 ```
 简历解析 → AI 分析推荐搜索关键词
      ↓
-API 批量拉取岗位（公司名/学历/经验完整数据）
+交互式关键词编辑 / 手动选择经验学历筛选
+     ↓
+浏览器扫码登录 → 触发搜索 → 网络监听捕获 BOSS SPA API 响应
      ↓
 逐个岗位:
-  ├─ 标题排除 / 学历过滤 / 技能过滤
+  ├─ 标题排除 / 学历过滤 / 经验过滤 / 技能过滤
   ├─ 🌐 DeepSeek 联网搜索公司风险（查工商/纠纷/经营异常）
   ├─ 🎯 DeepSeek 实时对照简历判断岗位适合度
   └─ ✅ 点击立即沟通 → 每日计数 +1
 ```
+
+## 🔍 搜索技术：网络监听捕获
+
+避免 BOSS 反爬拦截，采用 **DrissionPage 网络监听** 方式：
+
+```
+start_capture (启用监听) → 触发搜索 → 页面导航/滚动 → SPA 自动发起 API 请求 → 捕获响应体
+```
+
+- 首页：监听 SPA 搜索时的 API 响应
+- 翻页：滚动到底部触发懒加载，监听每页的 API 响应
+- 数据与页面显示完全一致（标题/公司/薪资均从 API JSON 提取）
+- 失败时自动回退到 DOM 解析
 
 ## 🛡️ 公司风险评估
 
@@ -116,26 +147,28 @@ DeepSeek **联网搜索**（非凭名字猜测）：
 
 ```
 auto-boss/
-├── main.py            # 主入口（CLI）
+├── main.py            # 主入口（CLI + 交互筛选）
 ├── config.yaml        # 配置文件
 ├── build.bat          # 打包脚本
 ├── boss_login.py      # BOSS直聘扫码登录
-├── job_search.py      # 岗位搜索（API + DOM）
+├── job_search.py      # 岗位搜索（网络监听 + DOM）
 ├── job_matcher.py     # 规则匹配打分
 ├── company_risk.py    # AI 风险评估 + 岗位匹配 + 关键词推荐
 ├── submitter.py       # 投递执行 + 每日计数
 ├── recorder.py        # 投递记录
 ├── resume_parser.py   # 简历解析
-└── utils.py           # 工具函数
+├── utils.py           # 工具函数
+├── CHANGELOG.md       # 更新日志
+└── capture_log.txt    # 搜索捕获日志（运行时生成）
 ```
 
 ## 🔧 技术栈
 
 - Python 3.10+
-- DrissionPage（浏览器自动化，无 Selenium 痕迹）
+- DrissionPage（浏览器自动化 + CDP 网络监听，无 Selenium 痕迹）
 - DeepSeek API（联网搜索 + 风险评估 + 岗位匹配）
 - PyMuPDF / pdfplumber / python-docx（简历解析）
-- PyYAML / requests / tkinter
+- PyYAML（配置解析）
 - PyInstaller（打包）
 
 ## 📄 License

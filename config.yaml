@@ -19,7 +19,11 @@ login:
 
 # --- 简历文件 ---
 resume:
-  file_path: "./_AI_Python_简历.pdf"    # 支持 .pdf / .docx / .txt（留空则自动扫描）
+  # 简历文件夹：自动扫描该目录下所有 .pdf/.docx/.txt 文件（推荐方式）
+  resume_dir: "./resumes"
+  # 手动指定（resume_dir 为空时生效）
+  file_paths: []
+  file_path: ""
   encoding: "utf-8"
 
 # --- 岗位搜索条件 ---
@@ -67,6 +71,9 @@ filter:
   ai_fit_min_score: 40   # 适合度得分 < 此值跳过
   # 最高学历限制：要求高于此学历的岗位跳过（留空=不限制）
   max_education: "本科"
+  # 最高经验限制：要求高于此经验的岗位跳过（留空=不限制）
+  # 可选: 应届生/在校生/1年以内/1-3年/3-5年/...
+  max_experience: "1-3年"
 
 # --- 公司风险检测 ---
 # mode: "rule"   → 基于规则的本地检测（免费，但数据有限）
@@ -75,7 +82,7 @@ risk_check:
   mode: "api"
   api:
     provider: "deepseek"
-    token: "sk-"
+    token: "sk-cd9b7bc276a44c0d875e4ca70c4f1e9f"
   # 规则模式关键词
   risk_keywords:
     - "裁员"

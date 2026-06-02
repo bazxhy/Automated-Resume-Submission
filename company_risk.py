@@ -120,8 +120,14 @@ class CompanyRiskChecker:
 
         # 跟踪：同公司有多少岗位
         self._company_job_count: dict[str, int] = {}
+        self._browser = None  # DrissionPage browser，set_browser() 注入
+        self._aiqicha_tab = None  # 爱企查专用 tab，复用避免频繁建/关
 
         logger.info(f"风险检测模式: {self.mode}")
+
+    def set_browser(self, browser):
+        """注入浏览器实例，用于爱企查等平台的公司信息查询"""
+        self._browser = browser
 
     def check(self, company_name: str, job: Optional[dict] = None) -> RiskResult:
         if self.mode == "api" and self.api_cfg.get("token"):
@@ -368,29 +374,90 @@ class CompanyRiskChecker:
 
     # ==================== DeepSeek 模式 ====================
 
+    def _scrape_company_info(self, name: str) -> str:
+        """用浏览器打开爱企查搜索公司（复用 tab，只有首次调用时创建）
+
+        返回页面文本摘要；失败返回空字符串
+        """
+        if not self._browser:
+            return ""
+        try:
+            from urllib.parse import quote
+
+            # 懒初始化爱企查专用 tab
+            if self._aiqicha_tab is None:
+                self._aiqicha_tab = self._browser.new_tab("https://aiqicha.baidu.com")
+                self._aiqicha_tab.wait(3)
+
+            tab = self._aiqicha_tab
+            search_url = f"https://aiqicha.baidu.com/s?q={quote(name)}"
+            tab.get(search_url)
+            tab.wait(2)  # 搜索结果比首页加载快
+
+            # 提取页面文字
+            try:
+                body_text = tab.run_js("return document.body? document.body.innerText : ''") or ""
+            except Exception:
+                body_text = ""
+                try:
+                    el = tab.ele("tag:body")
+                    body_text = el.text if el else ""
+                except Exception:
+                    pass
+
+            # 取前 2500 字符
+            result = (body_text or "").strip()[:2500]
+
+            if result and len(result) > 80:
+                logger.info(f"  🏢 爱企查「{name}」: {len(result)} 字符"
+                           f" | {result[:80].replace(chr(10),' ')}")
+                return result
+            return ""
+        except Exception as e:
+            logger.debug(f"  爱企查搜索失败「{name}」: {e}")
+            return ""
+
     def _check_via_deepseek(self, name: str) -> RiskResult:
-        """调用 DeepSeek 联网搜索对公司进行风险评估"""
+        """先浏览器查爱企查 → 结果喂给 DeepSeek 分析 → 无结果时 AI 联网搜索兜底"""
         token = self.api_cfg.get("token", "")
         if not token:
             return self._check_via_rules(name)
 
-        prompt = (
-            f'请联网搜索 "{name}" 这家公司的真实信息，评估对求职者是否存在风险。\n\n'
-            '对求职者高风险的信号（发现后严重扣分）：\n'
-            '- 是人力资源/劳务派遣/外包/中介公司\n'
-            '- 涉及培训贷、入职收费、岗前培训收费\n'
-            '- 有拖欠工资、劳动纠纷、裁员纠纷\n'
-            '- 经营异常、失信、注销/吊销\n\n'
-            '低风险信号：\n'
-            '- 正常经营的科技/网络/信息技术公司\n'
-            '- 知名品牌或上市企业\n\n'
-            '返回 JSON（不要加其他文字）：\n'
-            '{"score":0-100,"reasons":["基于搜索到的具体信息"],"summary":"15字内总结"}\n'
-            '评分：0-14=safe  15-34=low  35-59=medium  60-100=high'
-        )
+        # 1) 浏览器直接打开爱企查搜索，获取真实工商数据
+        aiqicha_data = self._scrape_company_info(name)
+        has_direct_data = bool(aiqicha_data and len(aiqicha_data) > 100)
 
-        logger.info(f"  🔍 联网搜索公司: \"{name}\"")
-        self._log_deepseek("REQ-风险", f"搜索公司: {name}")
+        # 2) 构建 prompt — 有爱企查数据时直接分析，无数据时才让 AI 联网搜索
+        if has_direct_data:
+            prompt = (
+                f'以下是"{name}"在爱企查上的搜索结果（浏览器实际抓取），请据此评估该公司对求职者的风险。\n\n'
+                f'=== 爱企查搜索结果 ===\n{aiqicha_data[:2000]}\n=== 数据结束 ===\n\n'
+                '分析要点：\n'
+                '- 工商状态：是否存续/在业？有无经营异常/失信/注销？\n'
+                '- 公司性质：是否人力资源/劳务派遣/外包/中介？\n'
+                '- 注册资本、参保人数、成立时间等基本信息\n'
+                '- 有无劳动纠纷、欠薪、裁员等负面记录\n\n'
+                '返回 JSON（不要加其他文字）：\n'
+                '{"score":0-100,"reasons":["基于爱企查数据的分析"],"summary":"15字内总结"}\n'
+                '评分：0-14=safe  15-34=low  35-59=medium  60-100=high'
+            )
+            logger.info(f"  🔍 分析爱企查数据: \"{name}\"")
+        else:
+            prompt = (
+                f'请联网搜索 "{name}" 这家公司的真实信息，评估对求职者是否存在风险。\n\n'
+                '搜索策略：搜「{name} 爱企查」「{name} 天眼查」「{name} 企查查」获取工商信息。\n\n'
+                '对求职者高风险的信号：\n'
+                '- 人力资源/劳务派遣/外包/中介公司\n'
+                '- 培训贷、入职收费、岗前培训收费\n'
+                '- 拖欠工资、劳动纠纷、裁员纠纷\n'
+                '- 经营异常、失信、注销/吊销\n\n'
+                '低风险信号：正常经营的科技/网络/信息技术公司，有正常工商注册信息\n\n'
+                '返回 JSON：{"score":0-100,"reasons":["基于搜索信息的分析"],"summary":"15字内总结"}\n'
+                '评分：0-14=safe  15-34=low  35-59=medium  60-100=high'
+            )
+            logger.info(f"  🔍 联网搜索公司: \"{name}\"")
+
+        self._log_deepseek("REQ-风险", f"公司: {name} | 爱企查数据: {len(aiqicha_data) if aiqicha_data else 0}字符")
 
         try:
             resp = self._session.post(
@@ -402,12 +469,11 @@ class CompanyRiskChecker:
                 json={
                     "model": "deepseek-chat",
                     "messages": [
-                        {"role": "system", "content": "你是招聘风险评估专家，可以联网搜索企业信息。只输出JSON。"},
+                        {"role": "system", "content": "你是招聘风险评估专家。只输出JSON。"},
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0,
-                    "max_tokens": 400,
-                    "enable_web_search": True,
+                    "max_tokens": 500,
                 },
                 timeout=30,
             )
@@ -449,15 +515,43 @@ class CompanyRiskChecker:
             text = "\n".join(lines)
         return text
 
+    # 无公开信息的信号词 — 搜不到信息的公司直接跳过
+    _NO_INFO_PATTERNS = [
+        "未搜索到", "未找到该公司的", "无相关信息",
+        "可能为不存在的公司", "名称有误",
+    ]
+    # 正面/已查到信息的信号 — 绝对优先，只要出现就不触发无信息判定
+    _FOUND_PATTERNS = [
+        "风险低", "风险极低", "安全", "safe",
+        "正常经营", "科技公司", "信息技术", "网络科技",
+        "知名", "上市", "注册资金", "参保人数",
+        "成立", "存续", "在业",
+        "有限公", "股份", "集团",
+    ]
+
     def _build_risk_result(self, parsed: dict, name: str) -> RiskResult:
         result = RiskResult()
         result.score = min(100, max(0, int(parsed.get("score", 0))))
-        # 优先用 score 映射 level（模型返回的 level 可能矛盾）
-        result.level = self._score_to_level(result.score)
         result.reasons = parsed.get("reasons", [])
         if isinstance(result.reasons, str):
             result.reasons = [result.reasons]
         summary = parsed.get("summary", "")
+
+        # 检测"无公开信息"的公司 → 标为高风险跳过
+        # 但正面信号绝对优先：只要模型自己说"风险低/安全/正常经营"，就信任它
+        all_text = " ".join(result.reasons) + " " + summary
+        has_positive = any(p in all_text for p in self._FOUND_PATTERNS)
+        if has_positive:
+            # 模型已查到公司真实信息且判断低风险 → 信任模型
+            result.level = self._score_to_level(result.score)
+        elif any(p in all_text for p in self._NO_INFO_PATTERNS):
+            # 完全搜不到信息 → 高风险跳过
+            result.score = 80
+            result.level = RiskLevel.HIGH
+            result.reasons = ["⚠️ 无公开信息，风险未知，跳过"]
+        else:
+            result.level = self._score_to_level(result.score)
+
         result.details = {"company": name, "mode": "deepseek+search",
                           "summary": summary, "raw": parsed}
         logger.info(
@@ -490,9 +584,9 @@ class CompanyRiskChecker:
         if not token:
             return None
 
-        resume_snippet = resume_text[:2000] if resume_text else ""
+        resume_snippet = resume_text[:5000] if resume_text else ""
         title = job.get("title", "")
-        desc = (job.get("description") or "")[:500]
+        desc = (job.get("description") or "")[:2000]
         skills = job.get("skills_required", [])
         location = job.get("location", "")
         education = job.get("education", "")
@@ -500,27 +594,35 @@ class CompanyRiskChecker:
         salary = job.get("salary", "")
 
         prompt = (
-            "你是求职匹配专家。根据候选人简历，判断以下岗位是否值得投递。\n\n"
-            f"=== 候选人简历 ===\n{resume_snippet}\n\n"
-            f"=== 岗位信息 ===\n"
+            "你是求职匹配专家。根据候选人简历（可能包含多份不同方向的简历），判断以下岗位是否值得投递。\n\n"
+            "⚠️ 重要：\n"
+            "- 候选人可能有多份简历覆盖不同技术方向（如一份嵌入式、一份AI/Python），"
+            "请综合所有简历的技能来判断，只要任一简历的方向与岗位匹配即可。\n"
+            "- ⚠️ 岗位描述(JD)才是技能要求的核心来源！不要只看标题，"
+            "必须从描述中提取实际的技术栈、工具链、领域知识要求，再与简历比对。\n"
+            "- 标题可能是 HR 随手写的，描述里的「任职要求/岗位职责」才是真实的。\n\n"
+            "=== 岗位信息 ===\n"
             f"标题：{title}\n"
-            f"薪资：{salary}\n"
-            f"地点：{location}\n"
-            f"经验要求：{experience}\n"
-            f"学历要求：{education}\n"
-            f"技能要求：{', '.join(skills) if skills else '无'}\n"
-            f"描述：{desc if desc else '无'}\n\n"
-            "分析维度：\n"
-            "1. 技术栈匹配度 - 岗位要求的技能是否在简历中出现过？\n"
-            "2. 经验匹配度 - 候选人的经验/学历是否满足要求？\n"
-            "3. 岗位真实性 - 描述是否笼统空泛？是否像刷KPI/培训广告？\n"
-            "4. 方向匹配度 - 岗位是否在候选人的专业方向上？\n\n"
+            f"薪资：{salary} | 地点：{location}\n"
+            f"经验要求：{experience} | 学历要求：{education}\n"
+            f"标签技能：{', '.join(skills) if skills else '无'}\n"
+            f"--- 岗位描述(JD) ---\n"
+            f"{desc if desc else '（无描述，标题为唯一参考）'}\n"
+            f"--- 描述结束 ---\n\n"
+            f"=== 候选人简历 ===\n{resume_snippet}\n\n"
+            "分析步骤（严格按顺序）：\n"
+            "1. 从「岗位描述」中提取实际技术要求：需要哪些编程语言？框架？工具？领域知识？\n"
+            "2. 将提取的要求与所有简历逐一比对：简历中有没有这些技能？直接相关还是可迁移？\n"
+            "3. 判断经验/学历是否满足\n"
+            "4. 判断岗位真实性：JD 是否笼统空泛？是否像刷KPI/培训广告？\n\n"
             "返回 JSON（不要加其他文字）：\n"
-            '{"score":0-100,"fit":true/false,"reasons":["理由1","理由2"],"missing":["缺失项1"]}\n\n'
-            "score>=75=高度匹配值得投递 fit=true\n"
+            '{"score":0-100,"fit":true/false,'
+            '"reasons":["理由：哪些技能匹配/不匹配，依据JD中的哪条要求"],'
+            '"missing":["候选人缺少的关键技能"]}\n\n'
+            "score>=75=技术要求大部分匹配，值得投递 fit=true\n"
             "score 50-74=部分匹配可以投 fit=true\n"
-            "score 35-49=不太匹配不建议投 fit=false\n"
-            "score<35=完全不匹配 fit=false"
+            "score 35-49=核心技能不匹配，不建议投 fit=false\n"
+            "score<35=方向完全不符 fit=false"
         )
 
         self._log_deepseek("REQ-匹配", f"岗位: {title} @ {job.get('company','?')}\n简历: {resume_snippet[:300]}")
@@ -535,18 +637,18 @@ class CompanyRiskChecker:
                 json={
                     "model": "deepseek-chat",
                     "messages": [
-                        {"role": "system", "content": "你是求职匹配专家，可以联网搜索岗位的真实要求。只输出JSON。"},
+                        {"role": "system", "content": "你是求职匹配专家，候选人可能有多份不同方向的简历，请综合判断。只输出JSON。"},
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.1,
-                    "max_tokens": 350,
+                    "max_tokens": 500,
                     "enable_web_search": True,
                 },
                 timeout=30,
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
-            self._log_deepseek("RSP-匹配", content[:500])
+            self._log_deepseek("RSP-匹配", content[:600])
             parsed = json.loads(self._clean_json(content))
 
             score = min(100, max(0, int(parsed.get("score", 50))))

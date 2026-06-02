@@ -1,6 +1,7 @@
 """
 BOSS直聘登录模块 — DrissionPage 版本
-DrissionPage 通过 CDP 直连原生浏览器，零 Selenium 痕迹
+⚠️  仅支持 Microsoft Edge 浏览器，绝不使用 Google Chrome
+DrissionPage 通过 CDP 直连 Edge，零 Selenium 痕迹
 BOSS直聘 完全检测不到自动化特征
 """
 
@@ -8,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import time
 from typing import Optional
@@ -77,7 +79,8 @@ class BossLogin:
                 edge_exe = p
                 break
         if edge_exe is None:
-            raise RuntimeError("找不到 Edge，请确认已安装")
+            raise RuntimeError("找不到 Edge 浏览器，请确认已安装 Microsoft Edge")
+        self._edge_exe = edge_exe
 
         os.makedirs(self.data_dir, exist_ok=True)
 
@@ -110,17 +113,19 @@ class BossLogin:
         except EOFError:
             pass
 
-    # ==================== CDP 连接 ====================
+    # ==================== CDP 连接（仅 Edge） ====================
 
     def _connect_via_cdp(self):
-        logger.info("正在连接到浏览器...")
+        logger.info("正在通过 CDP 连接到 Edge 浏览器...")
         co = ChromiumOptions()
+        # ⚠️ 强制指定 Edge 浏览器路径 — 无论什么情况都不允许启动 Chrome
+        co.set_browser_path(self._edge_exe)
         co.set_local_port(DEBUG_PORT)
-        co.set_argument(f"--window-size={self.window_size[0]},{self.window_size[1]}")
-        # DrissionPage 自带反检测，无需额外配置
 
         self.browser = Chromium(co)
-        logger.info("✅ 已连接到浏览器")
+        logger.info("✅ 已通过 CDP 连接到 Edge 浏览器")
+        logger.info(f"   browser 类型: {type(self.browser).__name__}")
+        logger.info(f"   连接端口: {DEBUG_PORT}")
 
         # 验证登录状态
         tab = self.browser.latest_tab
